@@ -1,0 +1,114 @@
+# ---------- PersistentVolume (storage provided by the admin) ----------
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: postgres-pv
+  labels:
+    app: postgres
+spec:
+  capacity:
+    storage: 5Gi
+  accessModes:
+    - ReadWriteOnce                 # mounted read/write by one node
+  persistentVolumeReclaimPolicy: Retain   # keep data when the PVC is deleted
+  storageClassName: manual
+  hostPath:
+    path: /mnt/data/postgres        # folder on the worker node
+    type: DirectoryOrCreate
+  # --- AWS EBS alternative (replace hostPath above with this) ---
+  # csi:
+  #   driver: ebs.csi.aws.com
+  #   volumeHandle: vol-0123456789abcdef0   # your EBS volume ID, same AZ as the node
+  #   fsType: ext4
+---
+# ---------- PersistentVolumeClaim (storage requested by the app) ----------
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-pvc
+  namespace: prod-env
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: manual          # must match the PV to bind to it
+  resources:
+    requests:
+      storage: 5Gi
+---
+# ---------- Secret for the database password ----------
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-secret
+  namespace: prod-env
+type: Opaque
+stringData:
+  POSTGRES_USER: appuser
+  POSTGRES_PASSWORD: Vinay123      # change this before using
+  POSTGRES_DB: appdb
+---
+# ---------- PostgreSQL Deployment ----------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: prod-env
+spec:
+  replicas: 1                       # one replica only (single data directory)
+  strategy:
+    type: Recreate                  # stop old pod before starting new (avoids two pods on one volume)
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16
+          ports:
+            - containerPort: 5432
+          envFrom:
+            - secretRef:
+                name: postgres-secret
+          env:
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata   # subfolder avoids the "lost+found" init error
+          volumeMounts:
+            - name: postgres-storage
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "appuser", "-d", "appdb"]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: postgres-storage
+          persistentVolumeClaim:
+            claimName: postgres-pvc
+---
+# ---------- Service (reachable inside the cluster at postgres:5432) ----------
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: prod-env
+spec:
+  type: ClusterIP
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+      
+      
+=======================================
